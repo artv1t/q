@@ -1,0 +1,4 @@
+Oct  8 01:38:05 2025 logs/session_2025-10-07T22-38-05/errors.log 0
+Oct  8 01:44:06 2025 logs/session_2025-10-07T22-38-05/events.log 8005
+Oct  8 01:38:06 2025 logs/session_2025-10-07T22-38-05/health.log 68
+Oct  8 01:45:02 2025 logs/session_2025-10-07T22-38-05/main.log 1049532
