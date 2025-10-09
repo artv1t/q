@@ -145,7 +145,7 @@ class LocalRouteGateFilter {
     const startTime = Date.now();
     this.stats.processed++;
     
-    const { mint, signature, metadata = {} } = tokenData;
+    const { mint, signature } = tokenData;
     
     try {
       if (!mint || typeof mint !== 'string' || mint.length < 32 || mint.length > 44) {
@@ -170,191 +170,48 @@ class LocalRouteGateFilter {
         return result;
       }
       
-      const cacheKey = mint;
-      const cachedQuote = this.quoteCache.get(cacheKey);
-      
-      let quoteResult = null;
-      
-      if (cachedQuote && (Date.now() - cachedQuote.timestamp) < this.cacheTTL) {
-        this.stats.cacheHits++;
-        quoteResult = cachedQuote.data;
-        
-        logger.debug(`🎯 ${this.name}: Cache hit for Jupiter quote`, {
-          mint,
-          routeExists: quoteResult?.routeExists,
-          priceImpactBps: quoteResult?.priceImpactBps
-        });
-      } else {
-        this.stats.cacheMisses++;
-        
-        quoteResult = await this.getJupiterQuote(mint);
-        
-        if (quoteResult) {
-          this.quoteCache.set(cacheKey, {
-            data: quoteResult,
-            timestamp: Date.now()
-          });
-        }
-      }
-      
-      if (!quoteResult) {
-        this.stats.apiErrors++;
-        this.stats.jupiterErrors++;
-        
-        const shouldPass = this.mode === 'LOG_ONLY' || !this.critical;
-        
-        if (shouldPass) {
-          this.stats.passed++;
-        } else {
-          this.stats.failed++;
-        }
-        
-        const result = {
-          pass: shouldPass,
-          critical: this.critical && !shouldPass,
-          scoreDelta: 0,
-          reason: 'jupiter_api_error',
-          action: shouldPass ? 'passed_log_only' : 'failed',
-          routeExists: false,
-          priceImpactBps: null,
-          processingTimeMs: Date.now() - startTime
-        };
-        
-        logger.info(`${shouldPass ? '⚠️' : '❌'} ${this.name}: Jupiter API error`, {
-          mint,
-          signature,
-          mode: this.mode,
-          ...result
-        });
-        
-        return result;
-      }
-      
-      if (!quoteResult.routeExists) {
-        this.stats.noRoute++;
-        
-        // В LOG_ONLY режиме всегда пропускаем токены без маршрутов
-        const shouldPass = this.mode === 'LOG_ONLY';
-        
-        if (shouldPass) {
-          this.stats.passed++;
-        } else {
-          this.stats.failed++;
-        }
-        
-        const result = {
-          pass: shouldPass,
-          critical: false, // Не критично для новых токенов
-          scoreDelta: 0, // Не штрафуем за отсутствие маршрутов
-          reason: 'no_route_new_token',
-          action: shouldPass ? 'passed_log_only' : 'failed',
-          routeExists: false,
-          priceImpactBps: null,
-          bestRouteSummary: null,
-          processingTimeMs: Date.now() - startTime
-        };
-        
-        logger.info(`${shouldPass ? '📝' : '❌'} ${this.name}: No route found for new token`, {
-          mint,
-          signature,
-          mode: this.mode,
-          ...result
-        });
-        
-        return result;
-      }
-      
-      this.stats.routeFound++;
-      
-      const priceImpactBps = quoteResult.priceImpactBps || 0;
-      const highImpact = priceImpactBps > this.maxPriceImpactBps;
-      
-      if (highImpact) {
-        this.stats.highPriceImpact++;
-      } else {
-        this.stats.lowPriceImpact++;
-      }
-      
-      const shouldPass = this.mode === 'LOG_ONLY' || !highImpact;
-      let scoreDelta = 0;
-      
-      if (shouldPass) {
-        this.stats.passed++;
-        if (priceImpactBps <= 200) {
-          scoreDelta = 0.3;
-        } else if (priceImpactBps <= 400) {
-          scoreDelta = 0.1;
-        } else {
-          scoreDelta = 0.0;
-        }
-      } else {
-        this.stats.failed++;
-        scoreDelta = -0.5;
-      }
+      this.stats.passed++;
       
       const result = {
-        pass: shouldPass,
-        critical: this.critical && !shouldPass,
-        scoreDelta: scoreDelta,
-        reason: shouldPass ? 
-          (this.mode === 'LOG_ONLY' ? 'log_only' : 'low_price_impact') : 
-          'high_price_impact',
-        action: shouldPass ? 'passed' : 'failed',
-        routeExists: true,
-        priceImpactBps: priceImpactBps,
-        priceImpactPercent: Math.round(priceImpactBps) / 100,
-        maxPriceImpactBps: this.maxPriceImpactBps,
-        bestRouteSummary: quoteResult.bestRouteSummary,
-        quoteAmountSOL: this.quoteAmountSOL,
-        mode: this.mode,
+        pass: true,
+        critical: false,
+        scoreDelta: 0,
+        reason: 'disabled',
+        action: 'passed_log_only',
         processingTimeMs: Date.now() - startTime
       };
       
-      logger.info(`${shouldPass ? '✅' : '❌'} ${this.name}: Token ${shouldPass ? 'passed' : 'failed'} Jupiter route checks`, {
+      logger.info(`📝 ${this.name}: LOG_ONLY mode`, {
+        filter: "05_localRouteGate",
+        result: {
+          action: "passed_log_only",
+          reason: "disabled",
+          critical: false
+        },
+        timeMs: result.processingTimeMs,
         mint,
-        signature,
-        ...result
+        signature
       });
       
       return result;
       
     } catch (error) {
-      this.stats.apiErrors++;
-      
-      // Определяем тип ошибки
-      let errorType = 'processing_error';
-      let shouldPass = this.mode === 'LOG_ONLY' || !this.critical;
-      
-      if (error.message.includes('fetch failed') || error.message.includes('network')) {
-        errorType = 'jupiter_api_error';
-        this.stats.jupiterErrors++;
-      } else if (error.message.includes('timeout') || error.name === 'AbortError') {
-        errorType = 'jupiter_timeout';
-        this.stats.jupiterTimeouts++;
-      } else if (error.message.includes('429')) {
-        errorType = 'jupiter_rate_limited';
-        this.stats.jupiter429++;
-      }
-      
-      if (shouldPass) {
-        this.stats.passed++;
-      } else {
-        this.stats.failed++;
-      }
+      this.stats.failed++;
       
       const result = {
-        pass: shouldPass,
-        critical: this.critical && !shouldPass,
-        scoreDelta: 0,
-        reason: errorType,
-        action: shouldPass ? 'passed_log_only' : 'failed',
+        pass: false,
+        critical: this.critical,
+        scoreDelta: -0.5,
+        reason: 'processing_error',
+        action: 'failed',
         error: error.message,
         processingTimeMs: Date.now() - startTime
       };
       
-      logger.error(`💥 ${this.name}: ${errorType}`, {
+      logger.error(`💥 ${this.name}: Processing error`, {
         mint,
         signature,
+        error: error.message,
         ...result
       });
       

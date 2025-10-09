@@ -214,47 +214,34 @@ class LPProtectionFilter {
     const startTime = Date.now();
     this.stats.processed++;
     
-    const { mint, signature, from3_5 = {} } = tokenData;
+    const { mint, signature } = tokenData;
     
     try {
-      let marketLabel = from3_5.marketLabel;
+      this.stats.decisions.pass_log_only++;
       
-      if (!marketLabel) {
-        marketLabel = await this.detectMarketLabel(mint);
-      }
+      const result = {
+        pass: true,
+        critical: false,
+        scoreDelta: 0,
+        reason: 'disabled',
+        action: 'passed_log_only',
+        processingTimeMs: Date.now() - startTime,
+        meta: {
+          branch: 'disabled',
+          marketLabel: 'disabled'
+        }
+      };
       
-      const branch = this.determineBranch(marketLabel);
-      this.stats.by_branch[branch]++;
-      
-      let result;
-      
-      switch (branch) {
-        case 'bonding_curve':
-          result = await this.processBondingCurve(mint, marketLabel);
-          break;
-        case 'cpmm':
-          result = await this.processCPMM(mint, marketLabel, from3_5.ammKey);
-          break;
-        case 'clmm_dlmm':
-          result = await this.processCLMM_DLMM(mint, marketLabel);
-          break;
-        default:
-          result = this.createResult(true, 0, 'unknown_branch', 'pass_log_only', {
-            branch: 'unknown',
-            marketLabel: marketLabel
-          });
-      }
-      
-      result.meta.branch = branch;
-      result.meta.marketLabel = marketLabel;
-      result.processingTimeMs = Date.now() - startTime;
-      
-      this.updateStats(result);
-      
-      logger.info(`${this.getResultIcon(result)} ${this.name}: Token processed`, {
+      logger.info(`📝 ${this.name}: LOG_ONLY mode`, {
+        filter: "06_lpProtection",
+        result: {
+          action: "passed_log_only", 
+          reason: "disabled",
+          critical: false
+        },
+        timeMs: result.processingTimeMs,
         mint,
-        signature,
-        ...result
+        signature
       });
       
       console.log('<- exited 3.6 (LPProtection)');
