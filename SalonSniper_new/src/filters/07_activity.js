@@ -3,8 +3,8 @@ const logger = require('../utils/logging');
 class ActivityFilter {
   constructor() {
     this.name = '07_activity';
-    this.enabled = process.env.POOL_SIZE_ENABLED === 'true';
-    this.critical = process.env.POOL_SIZE_CRITICAL === 'true';
+    this.enabled = process.env.ACTIVITY_FILTER_ENABLED !== 'false';
+    this.critical = process.env.ACTIVITY_FILTER_CRITICAL === 'true';
     
     this.windowMin = parseInt(process.env.ACT_WINDOW_MIN) || 10;
     this.spikeWindowSec = parseInt(process.env.ACT_SPIKE_WINDOW_SEC) || 60;
