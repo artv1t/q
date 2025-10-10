@@ -6,6 +6,16 @@ class ActivityFilter {
   constructor() {
     this.name = '07_activity';
     this.SPL_TOKEN_PROGRAM_ID = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
+    this.ALLOWED_PROGRAM_IDS = [
+      '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',  // pump.fun
+      '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8', // raydium_amm_v4
+      'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK', // raydium_clmm
+      'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc',  // orca_whirlpool
+      'LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo',  // meteora_dlmm
+      '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM',  // raydium_cp_swap
+      'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4',   // jupiter_v6
+      'JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB'    // jupiter_v4
+    ];
     this.enabled = process.env.ACTIVITY_FILTER_ENABLED !== 'false';
     this.critical = process.env.ACTIVITY_FILTER_CRITICAL === 'true';
     
@@ -27,6 +37,9 @@ class ActivityFilter {
       wsConnected: false,
       wsReconnects: 0,
       eventsReceived: 0,
+      eventsProcessed: 0,
+      dexEventsFound: 0,
+      tradesAdded: 0,
       avg_latency_ms: 0,
       startTime: Date.now()
     };
@@ -125,12 +138,31 @@ class ActivityFilter {
     try {
       const { result } = params;
       const { value } = result;
-      const { signature } = value;
       
       this.stats.eventsReceived++;
       
-      if (signature) {
+      if (this.stats.eventsReceived <= 3) {
+        logger.info(`🔍 ${this.name}: WebSocket event structure sample`, {
+          eventNumber: this.stats.eventsReceived,
+          paramsKeys: Object.keys(params || {}),
+          resultKeys: Object.keys(result || {}),
+          valueKeys: Object.keys(value || {}),
+          hasSignature: !!value?.signature,
+          signature: value?.signature?.substring(0, 20) + '...'
+        });
+      }
+      
+      const signature = value?.signature;
+      if (signature && typeof signature === 'string') {
         await this.processTransactionForActivity(signature);
+      } else {
+        if (this.stats.eventsReceived <= 5) {
+          logger.warn(`🔍 ${this.name}: No valid signature in WebSocket event`, {
+            eventNumber: this.stats.eventsReceived,
+            signatureType: typeof signature,
+            signatureValue: signature
+          });
+        }
       }
     } catch (error) {
       logger.debug(`🔍 ${this.name}: Log notification error (normal)`, { error: error.message });
@@ -139,26 +171,157 @@ class ActivityFilter {
 
   async processTransactionForActivity(signature) {
     try {
-      const apiKey = process.env.HELIUS_API_KEY || process.env.HELIUS_RPC_URL?.split('api-key=')[1];
-      const url = `https://api.helius.xyz/v0/transactions?api-key=${apiKey}`;
+      this.stats.eventsProcessed++;
+      
+      const apiKey = process.env.HELIUS_PARSE_TX?.split('api-key=')[1] || 
+                     process.env.HELIUS_RPC?.split('api-key=')[1];
+      const url = process.env.HELIUS_PARSE_TX || `https://api.helius.xyz/v0/transactions?api-key=${apiKey}`;
+      
+      if (this.stats.eventsProcessed <= 5) {
+        logger.info(`🔍 ${this.name}: Processing transaction #${this.stats.eventsProcessed}`, {
+          signature: signature.substring(0, 20) + '...',
+          totalProcessed: this.stats.eventsProcessed,
+          apiKeyFound: !!apiKey,
+          urlConfigured: !!url
+        });
+      }
+      
       const response = await axios.post(url, {
-        transactions: [signature]
+        transactions: [signature],
+        includeTokenTransfers: true,
+        includeAccountData: true,
+        includeInstructions: true
       }, {
         timeout: 5000,
         headers: { 'Content-Type': 'application/json' }
       });
       
+      if (this.stats.eventsProcessed <= 5) {
+        logger.info(`🔍 ${this.name}: REST API response #${this.stats.eventsProcessed}`, {
+          signature: signature.substring(0, 20) + '...',
+          hasData: !!response.data,
+          dataLength: response.data?.length || 0,
+          hasTransaction: !!(response.data && response.data[0]),
+          responseStatus: response.status
+        });
+      }
+      
       if (response.data && response.data[0]) {
         const transaction = response.data[0];
-        this.extractActivityFromTransaction(transaction);
+        
+        if (this.stats.eventsProcessed <= 3) {
+          logger.info(`🔍 ${this.name}: Enhanced transaction analysis #${this.stats.eventsProcessed}`, {
+            signature: signature.substring(0, 20) + '...',
+            transactionKeys: Object.keys(transaction),
+            hasTokenTransfers: !!transaction.tokenTransfers,
+            tokenTransfersCount: transaction.tokenTransfers?.length || 0,
+            hasNativeTransfers: !!transaction.nativeTransfers,
+            nativeTransfersCount: transaction.nativeTransfers?.length || 0,
+            hasInstructions: !!transaction.instructions,
+            instructionsCount: transaction.instructions?.length || 0,
+            type: transaction.type,
+            source: transaction.source,
+            description: transaction.description?.substring(0, 100),
+            tokenTransfersSample: transaction.tokenTransfers?.slice(0, 2).map(t => ({
+              mint: t.mint,
+              fromUserAccount: t.fromUserAccount,
+              toUserAccount: t.toUserAccount,
+              tokenAmount: t.tokenAmount
+            })),
+            instructionsSample: transaction.instructions?.slice(0, 2).map(inst => ({
+              programId: inst.programId,
+              data: inst.data ? Object.keys(inst.data) : null
+            })),
+            allowedPrograms: this.ALLOWED_PROGRAM_IDS
+          });
+        }
+        
+        const isDexTransaction = this.isFromTargetDEX(transaction);
+        
+        if (isDexTransaction) {
+          this.stats.dexEventsFound++;
+          if (this.stats.dexEventsFound <= 10) {
+            logger.info(`✅ ${this.name}: DEX transaction found #${this.stats.dexEventsFound}`, {
+              signature: signature.substring(0, 20) + '...',
+              tokenTransfersCount: transaction.tokenTransfers?.length || 0,
+              description: transaction.description?.substring(0, 100),
+              type: transaction.type,
+              source: transaction.source
+            });
+          }
+          this.extractActivityFromTransaction(transaction);
+        }
+      } else {
+        if (this.stats.eventsProcessed <= 5) {
+          logger.warn(`🔍 ${this.name}: No transaction data received for signature ${signature}`);
+        }
       }
     } catch (error) {
-      logger.debug(`🔍 ${this.name}: Transaction processing error (normal)`, { error: error.message });
+      if (this.stats.eventsProcessed <= 10) {
+        logger.warn(`🔍 ${this.name}: Transaction processing error`, { 
+          error: error.message,
+          signature: signature.substring(0, 20) + '...',
+          url: `https://api.helius.xyz/v0/transactions?api-key=***`
+        });
+      }
     }
   }
 
   extractActivityFromTransaction(transaction) {
     try {
+      if (this.stats.eventsProcessed <= 3) {
+        logger.info(`🔍 ${this.name}: Detailed transaction analysis #${this.stats.eventsProcessed}`, {
+          transactionKeys: Object.keys(transaction),
+          hasDescription: !!transaction.description,
+          description: transaction.description?.substring(0, 100),
+          hasInstructions: !!transaction.instructions,
+          instructionsCount: transaction.instructions?.length || 0,
+          hasTokenTransfers: !!transaction.tokenTransfers,
+          tokenTransfersCount: transaction.tokenTransfers?.length || 0,
+          instructionsSample: transaction.instructions?.slice(0, 2).map(inst => ({
+            programId: inst.programId,
+            keys: Object.keys(inst)
+          })),
+          tokenTransfersSample: transaction.tokenTransfers?.slice(0, 2).map(t => ({
+            mint: t.mint,
+            fromUserAccount: t.fromUserAccount,
+            toUserAccount: t.toUserAccount,
+            tokenAmount: t.tokenAmount
+          }))
+        });
+      }
+
+      const isDexTransaction = this.isFromTargetDEX(transaction);
+      
+      if (this.stats.eventsProcessed <= 5) {
+        logger.info(`🔍 ${this.name}: DEX detection analysis #${this.stats.eventsProcessed}`, {
+          isDexTransaction,
+          description: transaction.description?.substring(0, 80),
+          descriptionMatch: this.checkDescriptionMatch(transaction.description),
+          instructionMatch: this.checkInstructionMatch(transaction.instructions),
+          instructionsCount: transaction.instructions?.length || 0,
+          allowedPrograms: this.ALLOWED_PROGRAM_IDS.slice(0, 3)
+        });
+      }
+
+      if (!isDexTransaction) {
+        if (this.stats.eventsProcessed <= 5) {
+          logger.info(`🔍 ${this.name}: Transaction rejected - not DEX #${this.stats.eventsProcessed}`, {
+            description: transaction.description?.substring(0, 50),
+            hasInstructions: !!transaction.instructions,
+            instructionsCount: transaction.instructions?.length || 0
+          });
+        }
+        return;
+      }
+
+      this.stats.dexEventsFound++;
+      logger.info(`🎯 ${this.name}: DEX transaction found! Total: ${this.stats.dexEventsFound}`, {
+        description: transaction.description?.substring(0, 100),
+        tokenTransfersCount: transaction.tokenTransfers?.length || 0,
+        signature: transaction.signature?.substring(0, 20) + '...'
+      });
+
       if (transaction.tokenTransfers && Array.isArray(transaction.tokenTransfers)) {
         for (const transfer of transaction.tokenTransfers) {
           if (this.isValidActivityTransfer(transfer)) {
@@ -168,19 +331,65 @@ class ActivityFilter {
               timestamp: Date.now(),
               side: 'trade'
             });
+            
+            this.stats.tradesAdded++;
+            
+            logger.info(`🎯 ${this.name}: Trade event added for mint ${transfer.mint}`, {
+              trader: transfer.fromUserAccount || transfer.toUserAccount,
+              amount: this.estimateSOLAmount(transfer.tokenAmount),
+              totalTrades: this.stats.tradesAdded
+            });
           }
         }
+      } else {
+        logger.info(`🔍 ${this.name}: DEX transaction has no tokenTransfers`, {
+          hasTokenTransfers: !!transaction.tokenTransfers,
+          tokenTransfersType: typeof transaction.tokenTransfers,
+          tokenTransfersCount: transaction.tokenTransfers?.length || 0
+        });
       }
     } catch (error) {
-      logger.debug(`🔍 ${this.name}: Activity extraction error (normal)`, { error: error.message });
+      logger.error(`🔍 ${this.name}: Activity extraction error`, { 
+        error: error.message,
+        stack: error.stack?.substring(0, 200)
+      });
     }
+  }
+
+  isFromTargetDEX(transaction) {
+    if (transaction.tokenTransfers && Array.isArray(transaction.tokenTransfers) && 
+        transaction.tokenTransfers.length >= 1) {
+      return true;
+    }
+    
+    return true;
+  }
+
+  checkDescriptionMatch(description) {
+    if (!description || typeof description !== 'string') return false;
+    const desc = description.toLowerCase();
+    return desc.includes('pump.fun') || desc.includes('pumpfun') || 
+           desc.includes('raydium') || desc.includes('orca') || 
+           desc.includes('meteora') || desc.includes('swap') ||
+           desc.includes('trade') || desc.includes('buy') || desc.includes('sell');
+  }
+
+  checkInstructionMatch(instructions) {
+    if (!instructions || !Array.isArray(instructions)) return false;
+    for (const instruction of instructions) {
+      if (instruction.programId && this.ALLOWED_PROGRAM_IDS.includes(instruction.programId)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   isValidActivityTransfer(transfer) {
     return transfer.mint && 
            transfer.tokenAmount > 0 && 
            (transfer.fromUserAccount || transfer.toUserAccount) &&
-           transfer.mint !== 'So11111111111111111111111111111111111111112';
+           transfer.mint !== 'So11111111111111111111111111111111111111112' && // Exclude wrapped SOL
+           transfer.mint !== 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'; // Exclude USDC
   }
 
   estimateSOLAmount(tokenAmount) {
@@ -245,7 +454,10 @@ class ActivityFilter {
       websocket: {
         connected: this.stats.wsConnected,
         reconnects: this.stats.wsReconnects,
-        eventsReceived: this.stats.eventsReceived
+        eventsReceived: this.stats.eventsReceived,
+        eventsProcessed: this.stats.eventsProcessed,
+        dexEventsFound: this.stats.dexEventsFound,
+        tradesAdded: this.stats.tradesAdded
       },
       throughput: {
         tokensPerMinute: runtimeMinutes > 0 ? 
