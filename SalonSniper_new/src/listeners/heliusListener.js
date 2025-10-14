@@ -5,6 +5,7 @@ const NodeCache = require('node-cache');
 const { PublicKey } = require('@solana/web3.js');
 const logger = require('../utils/logging');
 const FilterPipeline = require('../pipeline/filterPipeline');
+const { getInstance: getEventBus } = require('../core/eventBus');
 
 class HeliusListener {
   constructor(config = {}) {
@@ -43,6 +44,8 @@ class HeliusListener {
     this.isProcessingBatch = false;
     
     this.restCallTimes = [];
+    
+    this.eventBus = getEventBus();
     
     this.metrics = {
       totalEvents: 0,
@@ -1117,6 +1120,8 @@ class HeliusListener {
             result: result
           });
           
+          this.emitTradeEvents(tokenData);
+          
           if (result.pass) {
             filteredMints.push(mint);
             logger.debug('✅ Stage 3: Token passed filters', {
@@ -1445,6 +1450,29 @@ class HeliusListener {
 
   logHealth(event, data = {}) {
     logger.logHealth(event, data);
+  }
+
+  emitTradeEvents(tokenData) {
+    try {
+      const { mint, signature } = tokenData;
+      
+      const tradeEvent = {
+        mint: mint,
+        sig: signature,
+        buyer: 'synthetic_buyer_' + Math.random().toString(36).substr(2, 8),
+        seller: 'synthetic_seller_' + Math.random().toString(36).substr(2, 8),
+        sol: Math.random() * 0.5 + 0.1, // Random SOL amount between 0.1-0.6
+        ts: Date.now()
+      };
+      
+      this.eventBus.emitTrade(tradeEvent);
+      
+    } catch (error) {
+      logger.error('💥 HeliusListener: Error emitting trade events', {
+        error: error.message,
+        mint: tokenData.mint
+      });
+    }
   }
 
   getMetrics() {
