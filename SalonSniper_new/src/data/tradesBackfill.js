@@ -33,16 +33,16 @@ class TradesBackfill {
     try {
       const cutoffTs = nowTs - (maxMinutes * 60 * 1000);
       
-      const url = `${this.baseUrl}/addresses/${mint}/transactions?api-key=${this.heliusApiKey}`;
-      const requestBody = {
-        limit: this.maxEvents,
-        before: null
+      const url = `${this.baseUrl}/addresses/${mint}/transactions`;
+      const params = {
+        'api-key': this.heliusApiKey,
+        limit: this.maxEvents
       };
       
-      const response = await axios.post(url, requestBody, {
+      const response = await axios.get(url, {
+        params: params,
         timeout: this.timeoutMs,
         headers: {
-          'Content-Type': 'application/json',
           'Accept': 'application/json'
         }
       });
