@@ -14,7 +14,9 @@ const logger = require('../utils/logging');
 
 class TradesBackfill {
   constructor() {
-    this.heliusApiKey = process.env.HELIUS_API_KEY;
+    const heliusRpc = process.env.HELIUS_RPC || '';
+    const apiKeyMatch = heliusRpc.match(/api-key=([^&]+)/);
+    this.heliusApiKey = apiKeyMatch ? apiKeyMatch[1] : '';
     this.baseUrl = 'https://api.helius.xyz/v0';
     this.maxEvents = 500;
     this.timeoutMs = 10000;
