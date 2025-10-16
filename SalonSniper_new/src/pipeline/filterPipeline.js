@@ -4,8 +4,8 @@ const SanityFilter = require('../filters/02_sanity');
 const RenouncedFilter = require('../filters/03_renounced');
 const MutableFilter = require('../filters/04_mutable');
 const LocalRouteGateFilter = require('../filters/05_localRouteGate');
-const LPProtectionFilter = require('../filters/06_lpProtection');
-const { getInstance: getActivityFilter } = require('../filters/07_activity');
+const PriceTrendFilter = require('../filters/06_priceTrend');
+const VolumeTrendFilter = require('../filters/07_volumeTrend');
 const HoldersFilter = require('../filters/08_holders');
 
 class FilterPipeline {
@@ -20,8 +20,8 @@ class FilterPipeline {
       new RenouncedFilter(),
       new MutableFilter(),
       new LocalRouteGateFilter(),
-      new LPProtectionFilter(),
-      getActivityFilter(),
+      new PriceTrendFilter(),
+      new VolumeTrendFilter(),
       new HoldersFilter()
     ];
     
@@ -104,12 +104,6 @@ class FilterPipeline {
             timeMs: Date.now() - filterStart
           });
           
-          if (filter.name === '04_mutable' && result.pass) {
-            const activityFilter = this.filters.find(f => f.name === '07_activity');
-            if (activityFilter && activityFilter.registerWatch) {
-              activityFilter.registerWatch(tokenData.mint);
-            }
-          }
           
           if (result.critical && !result.pass) {
             this.stats.totalFailed++;
