@@ -7,11 +7,14 @@ class PriceTrendFilter {
     this.enabled = process.env.PRICE_TREND_FILTER_ENABLED !== 'false';
     this.critical = process.env.PRICE_TREND_CRITICAL === 'true';
     
-    this.mode = process.env.PRICE_TREND_MODE || 'FLOW';
-    this.nonNegative = process.env.PRICE_TREND_NON_NEGATIVE === 'true';
-    this.minGain60to15Bp = parseInt(process.env.PRICE_TREND_MIN_GAIN_60_15_BP) || 0;
+    const windowsStr = process.env.PRICE_TREND_WINDOWS || '15,30,60';
+    this.windows = windowsStr.split(',').map(w => parseInt(w.trim()));
     
-    this.windows = [5, 15, 30, 60];
+    this.mode = process.env.PRICE_TREND_MODE || 'VWAP';
+    this.minRiseBps = parseInt(process.env.PRICE_TREND_MIN_RISE_BPS) || 300;
+    this.allowZeroLower = process.env.PRICE_TREND_ALLOW_ZERO_LOWER === 'true';
+    this.requireHistoryMinutes = parseInt(process.env.PRICE_TREND_REQUIRE_HISTORY_MINUTES) || 0;
+    
     this.tradesBackfill = getTradesBackfill();
     
     this.stats = {
@@ -20,11 +23,7 @@ class PriceTrendFilter {
       failed: 0,
       price_down_60_30: 0,
       price_down_30_15: 0,
-      price_down_15_5: 0,
-      flow_down_60_30: 0,
-      flow_down_30_15: 0,
-      flow_down_15_5: 0,
-      rpc_error_trades_backfill: 0,
+      insufficient_history: 0,
       startTime: Date.now()
     };
     
@@ -32,8 +31,8 @@ class PriceTrendFilter {
       enabled: this.enabled,
       critical: this.critical,
       mode: this.mode,
-      nonNegative: this.nonNegative,
-      minGain60to15Bp: this.minGain60to15Bp
+      windows: this.windows,
+      minRiseBps: this.minRiseBps
     });
   }
 
@@ -56,59 +55,63 @@ class PriceTrendFilter {
         };
       }
       
-      const trades = await this.tradesBackfill.fetchRecentTrades(mint, 60);
+      const trades = await this.tradesBackfill.fetchRecentTrades(mint, Math.max(...this.windows));
       
       if (trades.length === 0) {
-        this.stats.rpc_error_trades_backfill++;
-        this.stats.failed++;
-        
-        const result = {
-          pass: false,
-          critical: this.critical,
-          scoreDelta: -0.3,
-          reason: 'rpc_error_trades_backfill',
-          action: 'failed',
-          processingTimeMs: Date.now() - startTime
-        };
-        
-        logger.info(`❌ ${this.name}: No trades data`, {
-          mint: mint.substring(0, 8) + '...',
-          signature: signature.substring(0, 8) + '...',
-          ...result
-        });
-        
-        return result;
+        if (this.requireHistoryMinutes === 0) {
+          this.stats.insufficient_history++;
+          this.stats.passed++;
+          return {
+            pass: true,
+            critical: false,
+            scoreDelta: 0,
+            reason: 'insufficient_history',
+            action: 'passed',
+            processingTimeMs: Date.now() - startTime
+          };
+        } else {
+          this.stats.failed++;
+          return {
+            pass: false,
+            critical: this.critical,
+            scoreDelta: -0.3,
+            reason: 'no_trades_data',
+            action: 'failed',
+            processingTimeMs: Date.now() - startTime
+          };
+        }
       }
       
-      const trendResult = this.analyzePriceTrend(trades);
+      const priceResult = this.analyzePriceTrend(trades);
       
       const result = {
-        pass: trendResult.pass,
-        critical: this.critical && !trendResult.pass,
-        scoreDelta: trendResult.pass ? 0.2 : -0.3,
-        reason: trendResult.reason,
-        action: trendResult.pass ? 'passed' : 'failed',
+        pass: priceResult.pass,
+        critical: this.critical && !priceResult.pass,
+        scoreDelta: priceResult.pass ? 0.2 : -0.3,
+        reason: priceResult.reason,
+        action: priceResult.pass ? 'passed' : 'failed',
         processingTimeMs: Date.now() - startTime,
-        ...trendResult.metrics
+        ...priceResult.metrics
       };
       
       this.updateStats(result);
       
       if (result.pass) {
         logger.debug(`✅ ${this.name}: Token passed`, {
-          stage: "TRACE",
+          stage: "CHK",
           filter: "06_priceTrend",
           mode: this.mode,
-          mint_short: mint.substring(0, 8) + '...',
-          ts: Date.now(),
-          win: trendResult.metrics
+          windows: this.windows,
+          prices: priceResult.metrics,
+          rise_bps: this.minRiseBps,
+          reason: result.reason
         });
       } else {
         logger.info(`❌ ${this.name}: Token failed`, {
           mint: mint.substring(0, 8) + '...',
           signature: signature.substring(0, 8) + '...',
           reason: result.reason,
-          metrics: trendResult.metrics
+          prices: priceResult.metrics
         });
       }
       
@@ -116,13 +119,12 @@ class PriceTrendFilter {
       
     } catch (error) {
       this.stats.failed++;
-      this.stats.rpc_error_trades_backfill++;
       
       const result = {
         pass: false,
         critical: this.critical,
         scoreDelta: -0.5,
-        reason: 'rpc_error_trades_backfill',
+        reason: 'processing_error',
         action: 'failed',
         error: error.message,
         processingTimeMs: Date.now() - startTime
@@ -140,72 +142,61 @@ class PriceTrendFilter {
 
   analyzePriceTrend(trades) {
     const now = Date.now();
-    const windows = {};
+    const prices = {};
     
     for (const windowMin of this.windows) {
       const cutoff = now - (windowMin * 60 * 1000);
       const windowTrades = trades.filter(t => t.ts >= cutoff);
       
-      if (this.mode === 'VWAP' && windowTrades.some(t => t.tokenAmount)) {
-        let totalValue = 0;
-        let totalVolume = 0;
-        
-        for (const trade of windowTrades) {
-          if (trade.tokenAmount && trade.tokenAmount > 0) {
-            const price = trade.sol / trade.tokenAmount;
-            totalValue += price * trade.tokenAmount;
-            totalVolume += trade.tokenAmount;
-          }
-        }
-        
-        windows[windowMin] = totalVolume > 0 ? totalValue / totalVolume : 0;
-      } else {
-        const netSol = windowTrades.reduce((sum, trade) => {
-          return sum + (trade.side === 'buy' ? trade.sol : -trade.sol);
-        }, 0);
-        windows[windowMin] = netSol;
+      if (windowTrades.length === 0) {
+        prices[windowMin] = 0;
+        continue;
       }
+      
+      let totalValue = 0;
+      let totalVolume = 0;
+      
+      for (const trade of windowTrades) {
+        if (trade.tokenAmount && trade.tokenAmount > 0) {
+          const price = trade.sol / trade.tokenAmount;
+          totalValue += price * trade.tokenAmount;
+          totalVolume += trade.tokenAmount;
+        }
+      }
+      
+      prices[windowMin] = totalVolume > 0 ? totalValue / totalVolume : 0;
     }
     
-    const values = [windows[60], windows[30], windows[15], windows[5]];
+    const sortedWindows = [...this.windows].sort((a, b) => b - a); // [60, 30, 15]
     
-    for (let i = 0; i < values.length - 1; i++) {
-      if (values[i] > values[i + 1]) {
-        const reasons = [
-          'price_down_60_30',
-          'price_down_30_15', 
-          'price_down_15_5'
-        ];
-        const flowReasons = [
-          'flow_down_60_30',
-          'flow_down_30_15',
-          'flow_down_15_5'
-        ];
-        
-        const reason = this.mode === 'VWAP' ? reasons[i] : flowReasons[i];
+    for (let i = 0; i < sortedWindows.length - 1; i++) {
+      const largerWindow = sortedWindows[i];
+      const smallerWindow = sortedWindows[i + 1];
+      
+      const largerPrice = prices[largerWindow];
+      const smallerPrice = prices[smallerWindow];
+      
+      if (smallerPrice === 0 && this.allowZeroLower) {
+        continue;
+      }
+      
+      const requiredPrice = largerPrice * (1 + this.minRiseBps / 10000);
+      
+      if (smallerPrice < requiredPrice) {
+        const reason = `price_down_${largerWindow}_${smallerWindow}`;
         
         return {
           pass: false,
           reason: reason,
-          metrics: {
-            5: Math.round(values[3] * 1000) / 1000,
-            15: Math.round(values[2] * 1000) / 1000,
-            30: Math.round(values[1] * 1000) / 1000,
-            60: Math.round(values[0] * 1000) / 1000
-          }
+          metrics: prices
         };
       }
     }
     
     return {
       pass: true,
-      reason: 'price_trend_ok',
-      metrics: {
-        5: Math.round(values[3] * 1000) / 1000,
-        15: Math.round(values[2] * 1000) / 1000,
-        30: Math.round(values[1] * 1000) / 1000,
-        60: Math.round(values[0] * 1000) / 1000
-      }
+      reason: 'price_ok',
+      metrics: prices
     };
   }
 
