@@ -42,7 +42,7 @@ JUPITER_ALT_URL_2=https://jupiter-api.vercel.app/v6/quote
 | **3.5 LocalRouteGate** | ❌ НЕ РАБОТАЕТ | priceImpactBps: null | jupiterSuccessRate: -100%, routeFound: 0 |
 | **3.6 LP Protection** | ❌ НЕ РАБОТАЕТ | branch: unknown | 100% unknown branches, jup_errors: 5 |
 | **3.7 Pool Size** | ❌ НЕ РАБОТАЕТ | el_sol: 0 | 0% passRate, 0 el_sol значений |
-| **3.8 Holders** | ✅ РАБОТАЕТ | holders metrics | 100% passRate, avgProcessingTimeMs: 6652.8ms |
+| **3.6 Holders** | ✅ РАБОТАЕТ | holders metrics | 100% passRate, avgProcessingTimeMs: 6652.8ms |
 
 ## 6. Root Cause Analysis
 **Основная проблема**: Системная DNS проблема - `quote-api.jup.ag` не резолвится на уровне операционной системы.
@@ -75,7 +75,7 @@ JUPITER_ALT_URL_2=https://jupiter-api.vercel.app/v6/quote
 3. **ВРЕМЕННОЕ РЕШЕНИЕ**: Добавить в /etc/hosts: `185.199.108.153 quote-api.jup.ag`
 4. **ДОЛГОСРОЧНО**: Настроить альтернативные Jupiter endpoints
 
-**Статус фильтров**: 3.5-3.7 остаются неработоспособными из-за DNS проблемы. 3.8 работает отлично (использует RPC, не Jupiter).
+**Статус фильтров**: 3.5-3.7 остаются неработоспособными из-за DNS проблемы. 3.6 работает отлично (использует RPC, не Jupiter).
 
 ---
 *Отчёт создан: $(date)*

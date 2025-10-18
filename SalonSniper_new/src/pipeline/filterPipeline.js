@@ -4,9 +4,9 @@ const SanityFilter = require('../filters/02_sanity');
 const RenouncedFilter = require('../filters/03_renounced');
 const MutableFilter = require('../filters/04_mutable');
 const LocalRouteGateFilter = require('../filters/05_localRouteGate');
-const HoldersFilter = require('../filters/08_holders');
-const PriceTrendFilter = require('../filters/06_priceTrend');
-const VolumeTrendFilter = require('../filters/07_volumeTrend');
+const HoldersFilter = require('../filters/06_holders');
+const PriceTrendFilter = require('../filters/07_priceTrend');
+const VolumeTrendFilter = require('../filters/08_volumeTrend');
 
 class FilterPipeline {
   constructor() {

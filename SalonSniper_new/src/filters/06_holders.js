@@ -8,11 +8,13 @@ class HoldersFilter {
     this.critical = process.env.HOLDERS_CRITICAL === 'true';
     this.mode = process.env.HOLDERS_MODE || 'LOG_ONLY';
     
-    this.cacheTtlMs = parseInt(process.env.HOLDERS_CACHE_TTL_MS) || 60000;
-    this.rpcTimeoutMs = parseInt(process.env.HOLDERS_RPC_TIMEOUT_MS) || 2500;
-    this.concurrency = parseInt(process.env.HOLDERS_CONCURRENCY) || 4;
-    this.rateLimitQps = parseInt(process.env.HOLDERS_RATE_LIMIT_QPS) || 10;
-    this.topN = parseInt(process.env.HOLDERS_TOP_N) || 20;
+    this.cacheTtlMs = parseInt(process.env.HOLDERS_CACHE_TTL_MS) || 900000;
+    this.rpcTimeoutMs = parseInt(process.env.HOLDERS_RPC_TIMEOUT_MS) || 1500;
+    this.filterTimeoutMs = parseInt(process.env.HOLDERS_FILTER_TIMEOUT_MS) || 2500;
+    this.concurrency = parseInt(process.env.HOLDERS_CONCURRENCY) || 10;
+    this.rateLimitQps = parseInt(process.env.HOLDERS_RATE_LIMIT_QPS) || 40;
+    this.topN = parseInt(process.env.HOLDERS_TOP_N) || 5;
+    this.keepAlive = process.env.HOLDERS_KEEPALIVE === 'true';
     
     this.top1MaxPct = parseFloat(process.env.HOLDERS_TOP1_MAX_PCT) || 5;
     this.top5MaxPct = parseFloat(process.env.HOLDERS_TOP5_MAX_PCT) || 10;
@@ -45,7 +47,11 @@ class HoldersFilter {
       rpcErrors: 0,
       timeouts: 0,
       avgProcessingTimeMs: 0,
-      startTime: Date.now()
+      p95ProcessingTimeMs: 0,
+      earlyBailouts: 0,
+      rpcCallsPerToken: 2,
+      startTime: Date.now(),
+      processingTimes: []
     };
     
     this.knownContracts = new Set([
@@ -59,18 +65,21 @@ class HoldersFilter {
     
     this.startStatsTimer();
     
-    logger.info(`🔧 ${this.name}: Filter initialized`, {
+    logger.info(`🔧 ${this.name}: FAST_GATE Holders Filter initialized`, {
       enabled: this.enabled,
       critical: this.critical,
       mode: this.mode,
       topN: this.topN,
+      cacheTtlMin: Math.round(this.cacheTtlMs / 60000),
+      rpcTimeoutMs: this.rpcTimeoutMs,
+      filterTimeoutMs: this.filterTimeoutMs,
+      rateLimitQps: this.rateLimitQps,
+      concurrency: this.concurrency,
+      keepAlive: this.keepAlive,
       thresholds: {
         top1MaxPct: this.top1MaxPct,
         top5MaxPct: this.top5MaxPct,
-        top10MaxPct: this.top10MaxPct,
-        teamMaxPct: this.teamMaxPct,
-        newWalletsWarnPct: this.newWalletsWarnPct,
-        newWalletsFailPct: this.newWalletsFailPct
+        top10MaxPct: this.top10MaxPct
       }
     });
   }
@@ -189,98 +198,67 @@ class HoldersFilter {
   async analyzeHolders(mint, tokenData) {
     const analysis = {
       mint: mint,
-      circulatingSupply: 0,
-      topHolders: [],
-      metrics: {
-        top1Pct: 0,
-        top5Pct: 0,
-        top10Pct: 0,
-        teamPct: 0,
-        newWalletsPct: 0,
-        numUniqueOwners: 0
-      },
+      supply: null,
+      holders: [],
+      top1Pct: 0,
+      top5Pct: 0,
+      top10Pct: 0,
       evidence: []
     };
-    
+
     try {
-      const supplyInfo = await this.getTokenSupply(mint);
-      if (!supplyInfo || supplyInfo.value.uiAmount === 0) {
-        throw new Error('Invalid or zero supply');
+      const [supplyResult, holdersResult] = await Promise.all([
+        this.getTokenSupply(mint),
+        this.getTokenLargestAccounts(mint)
+      ]);
+
+      if (!supplyResult?.value?.uiAmount || !holdersResult?.value) {
+        analysis.evidence.push('Failed to get basic token info');
+        return analysis;
       }
+
+      analysis.supply = supplyResult.value.uiAmount;
+      const accounts = holdersResult.value.slice(0, this.topN);
       
-      analysis.circulatingSupply = supplyInfo.value.uiAmount;
-      
-      const largestAccounts = await this.getTokenLargestAccounts(mint);
-      if (!largestAccounts || largestAccounts.value.length === 0) {
-        throw new Error('No token accounts found');
-      }
-      
-      const holders = [];
-      const ownerSet = new Set();
-      
-      for (const account of largestAccounts.value.slice(0, this.topN)) {
-        try {
-          const accountInfo = await this.getAccountInfo(account.address);
-          if (!accountInfo || !accountInfo.value) continue;
-          
-          const parsed = accountInfo.value.data.parsed;
-          if (!parsed || !parsed.info) continue;
-          
-          const owner = parsed.info.owner;
-          const amount = parsed.info.tokenAmount.uiAmount;
-          
-          if (this.shouldExcludeOwner(owner)) continue;
-          
-          const pct = (amount / analysis.circulatingSupply) * 100;
-          
-          const isTeam = await this.isTeamWallet(owner, tokenData);
-          const isNew = await this.isNewWallet(owner);
-          
-          holders.push({
-            owner: owner,
-            amount: amount,
-            pct: pct,
-            isTeam: isTeam,
-            isNew: isNew
-          });
-          
-          ownerSet.add(owner);
-          
-        } catch (error) {
-          logger.warn(`${this.name}: Error processing account ${account.address}`, {
-            error: error.message
-          });
+      if (accounts.length > 0) {
+        const top1Pct = (accounts[0].uiAmount / analysis.supply) * 100;
+        if (top1Pct > this.top1MaxPct) {
+          analysis.top1Pct = top1Pct;
+          analysis.evidence.push(`Top1 holder: ${top1Pct.toFixed(1)}% > ${this.top1MaxPct}%`);
+          return analysis; // Early exit
         }
       }
+
+      let top5Total = 0, top10Total = 0;
       
-      holders.sort((a, b) => b.amount - a.amount);
-      analysis.topHolders = holders;
-      analysis.metrics.numUniqueOwners = ownerSet.size;
-      
-      analysis.metrics.top1Pct = holders.length > 0 ? holders[0].pct : 0;
-      analysis.metrics.top5Pct = holders.slice(0, 5).reduce((sum, h) => sum + h.pct, 0);
-      analysis.metrics.top10Pct = holders.slice(0, 10).reduce((sum, h) => sum + h.pct, 0);
-      analysis.metrics.teamPct = holders.filter(h => h.isTeam).reduce((sum, h) => sum + h.pct, 0);
-      analysis.metrics.newWalletsPct = holders.filter(h => h.isNew).reduce((sum, h) => sum + h.pct, 0);
-      
-      if (holders.length > 0) {
-        analysis.evidence = holders.slice(0, 3).map(h => ({
-          owner: h.owner,
-          amount: h.amount,
-          pct: Math.round(h.pct * 100) / 100,
-          isTeam: h.isTeam,
-          isNew: h.isNew
-        }));
+      for (let i = 0; i < Math.min(accounts.length, 10); i++) {
+        const account = accounts[i];
+        const pct = (account.uiAmount / analysis.supply) * 100;
+        
+        analysis.holders.push({
+          address: account.address,
+          amount: account.uiAmount,
+          percentage: pct
+        });
+        
+        if (i < 5) top5Total += pct;
+        top10Total += pct;
       }
+
+      analysis.top1Pct = analysis.holders[0]?.percentage || 0;
+      analysis.top5Pct = top5Total;
+      analysis.top10Pct = top10Total;
+
+      analysis.evidence = analysis.holders.map(h => 
+        `${h.address.substring(0, 8)}...: ${h.percentage.toFixed(1)}%`
+      );
+
+      return analysis;
       
     } catch (error) {
-      logger.error(`${this.name}: Analysis error for ${mint}`, {
-        error: error.message
-      });
-      throw error;
+      analysis.evidence.push(`RPC error: ${error.message}`);
+      return analysis;
     }
-    
-    return analysis;
   }
   
   shouldExcludeOwner(owner) {
@@ -289,111 +267,42 @@ class HoldersFilter {
            owner === '1nc1nerator11111111111111111111111111111111';
   }
   
-  async isTeamWallet(owner, tokenData) {
-    try {
-      if (tokenData.metadata) {
-        if (tokenData.metadata.updateAuthority === owner) return true;
-        if (tokenData.metadata.creators && 
-            tokenData.metadata.creators.some(c => c.address === owner)) return true;
-      }
-      
-      if (this.verifyTxHistory) {
-        const signatures = await this.getSignaturesForAddress(owner, { limit: 10 });
-        if (signatures && signatures.length > 0) {
-          const oldestSig = signatures[signatures.length - 1];
-          const now = Date.now() / 1000;
-          const sigTime = oldestSig.blockTime || now;
-          
-          if (now - sigTime < 3600) {
-            return true;
-          }
-        }
-      }
-      
-      return false;
-    } catch (error) {
-      logger.warn(`${this.name}: Error checking team wallet ${owner}`, {
-        error: error.message
-      });
-      return false;
-    }
-  }
-  
-  async isNewWallet(owner) {
-    try {
-      const signatures = await this.getSignaturesForAddress(owner, { limit: 1 });
-      if (!signatures || signatures.length === 0) return true;
-      
-      const firstSig = signatures[0];
-      const now = Date.now() / 1000;
-      const sigTime = firstSig.blockTime || now;
-      const ageDays = (now - sigTime) / 86400;
-      
-      return ageDays < this.newWalletAgeDays;
-    } catch (error) {
-      logger.warn(`${this.name}: Error checking wallet age ${owner}`, {
-        error: error.message
-      });
-      return false;
-    }
-  }
   
   makeDecision(analysis, startTime) {
-    const { metrics } = analysis;
     let pass = true;
+    let reason = 'holders_ok';
+    let scoreDelta = 0;
     let action = 'passed';
-    let reason = 'holder_distribution_ok';
-    let scoreDelta = 0.2;
-    
-    if (metrics.teamPct > this.teamMaxPct) {
+
+    if (analysis.top1Pct > this.top1MaxPct) {
       pass = false;
+      reason = 'top1_too_high';
+      scoreDelta = -0.8;
       action = 'failed';
-      reason = 'team_centralization';
-      scoreDelta = -0.4;
-    } else if (metrics.newWalletsPct > this.newWalletsFailPct) {
+    } else if (analysis.top5Pct > this.top5MaxPct) {
       pass = false;
+      reason = 'top5_too_high';
+      scoreDelta = -0.6;
       action = 'failed';
-      reason = 'new_wallets_mass';
-      scoreDelta = -0.4;
-    } else if (metrics.top1Pct > this.top1MaxPct) {
+    } else if (analysis.top10Pct > this.top10MaxPct) {
       pass = false;
-      action = 'failed';
-      reason = 'top1_concentration';
+      reason = 'top10_too_high';
       scoreDelta = -0.4;
-    } else if (metrics.top5Pct > this.top5MaxPct) {
-      pass = false;
       action = 'failed';
-      reason = 'top5_concentration';
-      scoreDelta = -0.4;
-    } else if (metrics.top10Pct > this.top10MaxPct) {
-      if (this.mode === 'STRICT') {
-        pass = false;
-        action = 'failed';
-        reason = 'top10_concentration';
-        scoreDelta = -0.3;
-      } else {
-        action = 'warn';
-        reason = 'top10_high';
-        scoreDelta = -0.1;
-      }
-    } else if (metrics.numUniqueOwners < 3) {
-      action = 'warn';
-      reason = 'too_few_owners';
-      scoreDelta = -0.1;
+    } else {
+      scoreDelta = 0.3;
     }
-    
-    if (this.mode === 'LOG_ONLY') {
-      pass = true;
-      action = 'passed_log_only';
-      scoreDelta = 0;
-    }
-    
-    return this.createResult(pass, scoreDelta, reason, action, {
-      circulatingSupply: analysis.circulatingSupply,
-      ...metrics,
-      topHolders: analysis.topHolders.slice(0, 5),
+
+    const metrics = {
+      supply: analysis.supply,
+      holdersCount: analysis.holders.length,
+      top1Pct: Math.round(analysis.top1Pct * 100) / 100,
+      top5Pct: Math.round(analysis.top5Pct * 100) / 100,
+      top10Pct: Math.round(analysis.top10Pct * 100) / 100,
       evidence: analysis.evidence
-    }, startTime);
+    };
+
+    return this.createResult(pass, scoreDelta, reason, action, metrics, startTime);
   }
   
   createResult(pass, scoreDelta, reason, action, metrics = {}, startTime = Date.now()) {
@@ -412,9 +321,20 @@ class HoldersFilter {
   
   updateStats(result, startTime) {
     const processingTime = Date.now() - startTime;
+    this.stats.processingTimes.push(processingTime);
+    
     this.stats.avgProcessingTimeMs = 
       (this.stats.avgProcessingTimeMs * (this.stats.totalProcessed - 1) + processingTime) / 
       this.stats.totalProcessed;
+    
+    if (this.stats.processingTimes.length >= 20) {
+      const sorted = [...this.stats.processingTimes].sort((a, b) => a - b);
+      this.stats.p95ProcessingTimeMs = sorted[Math.floor(sorted.length * 0.95)];
+    }
+    
+    if (result.reason === 'top1_too_high' && result.metrics && result.metrics.evidence && result.metrics.evidence.length === 1) {
+      this.stats.earlyBailouts++;
+    }
     
     if (result.pass) {
       this.stats.totalPassed++;
@@ -453,15 +373,6 @@ class HoldersFilter {
     return await this.makeRpcCall('getTokenLargestAccounts', [mintPubkey]);
   }
   
-  async getAccountInfo(address) {
-    const addressPubkey = new PublicKey(address);
-    return await this.makeRpcCall('getParsedAccountInfo', [addressPubkey]);
-  }
-  
-  async getSignaturesForAddress(address, options = {}) {
-    const addressPubkey = new PublicKey(address);
-    return await this.makeRpcCall('getSignaturesForAddress', [addressPubkey, options]);
-  }
   
   async makeRpcCall(method, params) {
     return new Promise((resolve, reject) => {
@@ -512,13 +423,24 @@ class HoldersFilter {
   }
   
   getStats() {
+    const cacheHitRate = this.stats.cacheHits + this.stats.cacheMisses > 0 ? 
+      (this.stats.cacheHits / (this.stats.cacheHits + this.stats.cacheMisses)) * 100 : 0;
+    
+    const earlyBailoutRate = this.stats.totalProcessed > 0 ? 
+      (this.stats.earlyBailouts / this.stats.totalProcessed) * 100 : 0;
+    
     return {
       ...this.stats,
       enabled: this.enabled,
       mode: this.mode,
       cacheSize: this.cache.size,
       queueLength: this.requestQueue.length,
-      activeRequests: this.activeRequests
+      activeRequests: this.activeRequests,
+      holdersLatencyMsAvg: Math.round(this.stats.avgProcessingTimeMs),
+      holdersLatencyMsP95: Math.round(this.stats.p95ProcessingTimeMs),
+      holdersRpcCallsPerToken: this.stats.rpcCallsPerToken,
+      holdersCacheHitPct: Math.round(cacheHitRate * 100) / 100,
+      holdersEarlyBailoutPct: Math.round(earlyBailoutRate * 100) / 100
     };
   }
   

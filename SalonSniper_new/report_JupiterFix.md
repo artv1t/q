@@ -31,7 +31,7 @@ JUPITER_FALLBACK_URL_IP=https://185.199.108.153/v4/quote
 | **3.5 LocalRouteGate** | ❌ НЕ РАБОТАЕТ | jupiterSuccessRate: -100%, routeFound: 0, priceImpactBps: null |
 | **3.6 LP Protection** | ❌ НЕ РАБОТАЕТ | 100% branch: unknown, jup_errors: 5, jup_requests: 5 |
 | **3.7 Pool Size** | ❌ НЕ РАБОТАЕТ | el_low: 0, el_ok: 0, passRate: 0% |
-| **3.8 Holders** | ✅ РАБОТАЕТ | passRate: 100%, avgProcessingTimeMs: 6652.8ms |
+| **3.6 Holders** | ✅ РАБОТАЕТ | passRate: 100%, avgProcessingTimeMs: 6652.8ms |
 
 ## Root Cause Analysis
 **Основная проблема**: DNS не резолвится `quote-api.jup.ag` на системном уровне.
