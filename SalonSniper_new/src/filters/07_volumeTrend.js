@@ -3,7 +3,7 @@ const { getInstance: getTradesBackfill } = require('../data/tradesBackfill');
 
 class VolumeTrendFilter {
   constructor() {
-    this.name = '07_volumeTrend';
+    this.name = '08_volumeTrend';
     this.enabled = process.env.VOL_FILTER_ENABLED !== 'false';
     this.critical = process.env.VOL_FILTER_CRITICAL === 'true';
     
@@ -106,7 +106,7 @@ class VolumeTrendFilter {
       if (result.pass) {
         logger.debug(`✅ ${this.name}: Token passed`, {
           stage: "CHK",
-          filter: "07_volumeTrend",
+          filter: "08_volumeTrend",
           windows: this.windows,
           metrics: volumeResult.metrics,
           reason: result.reason

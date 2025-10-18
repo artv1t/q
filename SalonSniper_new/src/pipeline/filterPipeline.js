@@ -4,9 +4,9 @@ const SanityFilter = require('../filters/02_sanity');
 const RenouncedFilter = require('../filters/03_renounced');
 const MutableFilter = require('../filters/04_mutable');
 const LocalRouteGateFilter = require('../filters/05_localRouteGate');
+const HoldersFilter = require('../filters/08_holders');
 const PriceTrendFilter = require('../filters/06_priceTrend');
 const VolumeTrendFilter = require('../filters/07_volumeTrend');
-const HoldersFilter = require('../filters/08_holders');
 
 class FilterPipeline {
   constructor() {
@@ -20,9 +20,9 @@ class FilterPipeline {
       new RenouncedFilter(),
       new MutableFilter(),
       new LocalRouteGateFilter(),
+      new HoldersFilter(),
       new PriceTrendFilter(),
-      new VolumeTrendFilter(),
-      new HoldersFilter()
+      new VolumeTrendFilter()
     ];
     
     this.stats = {
@@ -34,11 +34,12 @@ class FilterPipeline {
     
     this.startStatsTimer();
     
-    logger.info(`🔧 ${this.name}: Pipeline initialized`, {
+    logger.info(`🔧 ${this.name}: Pipeline initialized - NEW ORDER: 08→06, 06→07, 07→08`, {
       enabled: this.enabled,
       scoreThreshold: this.scoreThreshold,
       filtersCount: this.filters.length,
-      filters: this.filters.map(f => f.name)
+      filters: this.filters.map(f => f.name),
+      newOrder: '[01,02,03,04,05,08→06,06→07,07→08]'
     });
   }
   

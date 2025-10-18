@@ -3,7 +3,7 @@ const { getInstance: getTradesBackfill } = require('../data/tradesBackfill');
 
 class PriceTrendFilter {
   constructor() {
-    this.name = '06_priceTrend';
+    this.name = '07_priceTrend';
     this.enabled = process.env.PRICE_TREND_FILTER_ENABLED !== 'false';
     this.critical = process.env.PRICE_TREND_CRITICAL === 'true';
     
@@ -99,7 +99,7 @@ class PriceTrendFilter {
       if (result.pass) {
         logger.debug(`✅ ${this.name}: Token passed`, {
           stage: "CHK",
-          filter: "06_priceTrend",
+          filter: "07_priceTrend",
           mode: this.mode,
           windows: this.windows,
           prices: priceResult.metrics,

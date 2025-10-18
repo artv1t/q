@@ -3,7 +3,7 @@ const { Connection, PublicKey } = require('@solana/web3.js');
 
 class HoldersFilter {
   constructor() {
-    this.name = 'HoldersFilter';
+    this.name = '06_holders';
     this.enabled = process.env.HOLDERS_ENABLED === 'true';
     this.critical = process.env.HOLDERS_CRITICAL === 'true';
     this.mode = process.env.HOLDERS_MODE || 'LOG_ONLY';
